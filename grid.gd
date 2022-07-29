@@ -1,9 +1,15 @@
 class_name Grid extends Node3D
 
+@export
 var size: Vector2i
+@export
 var cell_size: float
-var _map: Array
-var astar: AStar2D = null
+
+var _map_data: Array
+
+var _cache_map_path: Array[PackedInt64Array]
+var _cache_map_cost: PackedFloat64Array
+var _map_obstacle # Callable or null; func(from: Vector2i, to: Vector2i, offset: Vector2i) -> ObstacleProperty
 
 
 func _init(grid_size: Vector2i, grid_cell_size: float = 1.0, default = null, pos: Vector3 = Vector3.ZERO) -> void:
@@ -13,7 +19,7 @@ func _init(grid_size: Vector2i, grid_cell_size: float = 1.0, default = null, pos
 	cell_size = grid_cell_size
 	position = pos
 	
-	_map.resize(grid_size.x * grid_size.y)
+	_map_data.resize(grid_size.x * grid_size.y)
 	
 	if default != null:
 		fill(default)
@@ -23,41 +29,95 @@ func fill(value) -> void:
 	var call_new := false
 	if typeof(value) == TYPE_OBJECT && "new" in value:
 		call_new = true
-	for i in range(_map.size()):
+	for i in range(_map_data.size()):
 		if call_new:
-			_map[i] = value.new()
+			_map_data[i] = value.new()
 		else:
-			_map[i] = value
+			_map_data[i] = value
 
 
-func construct_astar(diagonal: bool = true) -> void:
-	astar = AStar2D.new()
-	astar.reserve_space(size.x * size.y)
-	for x in range(size.x):
-		for y in range(size.y):
-			astar.add_point(_xy_to_id(x, y), Vector2i(x, y))
+class ObstacleProperty:
+	var is_calculate: bool = true
+	var to_coord := Vector2i(-1, -1)
+	var cost: float = 1.0
+
+# TODO Pass checkable offset from tile
+func initialize_path_finding(obstacle = null) -> void:
+	assert(typeof(obstacle) == TYPE_NIL || typeof(obstacle) == TYPE_CALLABLE)
+	_cache_map_path.resize(size.x * size.y)
+	_cache_map_cost.resize(size.x * size.y)
+	_map_obstacle = obstacle
+
+
+func generate_path_from(pos: Vector2i, max_cost: float):
+	_cache_map_path.fill(PackedInt64Array())
+	_cache_map_cost.fill(-1.0)
 	
-	for x in range(size.x):
-		for y in range(size.y):
-			if x + 1 < size.x:
-				astar.connect_points(_xy_to_id(x, y), _xy_to_id(x + 1, y))
-			if y + 1 < size.y:
-				astar.connect_points(_xy_to_id(x, y), _xy_to_id(x, y + 1))
-			if diagonal && x + 1 < size.x && y + 1 < size.y:
-				astar.connect_points(_xy_to_id(x, y), _xy_to_id(x + 1, y + 1))
+	var pos_id := _vector_to_id(pos)
+	_cache_map_path[pos_id] = PackedInt64Array([pos_id])
+	_cache_map_cost[pos_id] = 0
+	
+	var stack: Array[int] = [pos_id]
+	while !stack.is_empty():
+		var pop_id: int = stack.pop_back()
+		var pop_pos := _id_to_vector(pop_id)
+		
+		var offset_list: Array[Vector2i] = [
+				Vector2i.UP, Vector2i.UP + Vector2i.RIGHT,
+				Vector2i.RIGHT, Vector2i.DOWN + Vector2i.RIGHT,
+				Vector2i.DOWN, Vector2i.DOWN + Vector2i.LEFT,
+				Vector2i.LEFT, Vector2i.UP + Vector2i.LEFT
+			]
+		
+		for offset in offset_list:
+			# if _map_onstacle == null
+			var to_pos := pop_pos + offset
+			if !is_in_bound(to_pos):
+				continue
+			
+			var property: ObstacleProperty = _map_obstacle.call(pop_pos, to_pos, offset)
+			if !property.is_calculate:
+				continue
+			
+			if property.to_coord == Vector2i(-1, -1):
+				property.to_coord = to_pos
+			
+			if _path_check_cost(pop_id, _vector_to_id(property.to_coord), property.cost, max_cost):
+				stack.append(_vector_to_id(property.to_coord))
 
 
-func astar_get_path(from: Vector2i, to: Vector2i) -> PackedVector2Array:
-	var arr := astar.get_id_path(_vector_to_id(from), _vector_to_id(to))
-	var arr2 := PackedVector2Array()
-	arr2.resize(arr.size())
-	for i in range(arr.size()):
-		arr2[i] = Vector2(_id_to_vector(arr[i]))
-	return arr2
+func _path_check_cost(node_id: int, next_node_id: int, cost: float, max_cost: float) -> bool:
+	if next_node_id != -1 && _cache_map_cost[node_id] + cost <= max_cost:
+		if _cache_map_cost[next_node_id] == -1 || _cache_map_cost[next_node_id] > _cache_map_cost[node_id] + cost:
+			_cache_map_cost[next_node_id] = _cache_map_cost[node_id] + cost
+			_cache_map_path[next_node_id] = _cache_map_path[node_id].duplicate()
+			_cache_map_path[next_node_id].append(next_node_id)
+			return true
+	return false
+
+
+func get_path_points_to(pos: Vector2i) -> PackedVector2Array:
+	assert(is_in_bound(pos))
+	var result := PackedVector2Array()
+	var id := _vector_to_id(pos)
+	result.resize(_cache_map_path[id].size())
+	for i in range(_cache_map_path[id].size()):
+		result[i] = Vector2(_id_to_vector(_cache_map_path[id][i]))
+	return result
+
+
+func get_path_cost_to(pos: Vector2i) -> float:
+	assert(is_in_bound(pos))
+	return _cache_map_cost[_vector_to_id(pos)]
+
+
+func is_in_bound(vector: Vector2i) -> bool:
+	return vector.x >= 0 && vector.y >= 0 && vector.x < size.x && vector.y < size.y
+
 
 func get_cellv(pos: Vector2i):
-	assert(pos.x >= 0); assert(pos.y >= 0); assert(pos.x < size.x); assert(pos.y < size.y)
-	return _map[pos.y * size.x + pos.x]
+	assert(is_in_bound(pos))
+	return _map_data[pos.y * size.x + pos.x]
 
 
 func get_cell(x: int, y: int):
@@ -65,8 +125,8 @@ func get_cell(x: int, y: int):
 
 
 func set_cellv(pos: Vector2i, value) -> void:
-	assert(pos.x >= 0); assert(pos.y >= 0); assert(pos.x < size.x); assert(pos.y < size.y)
-	_map[pos.y * size.x + pos.x] = value
+	assert(is_in_bound(pos))
+	_map_data[pos.y * size.x + pos.x] = value
 
 
 func set_cell(x: int, y: int, value) -> void:
@@ -91,7 +151,7 @@ func get_local_position_from(viewport_position: Vector2, camera: Camera3D = get_
 
 
 func get_global_position_centerv(pos: Vector2i) -> Vector3:
-	assert(pos.x >= 0); assert(pos.y >= 0); assert(pos.x < size.x); assert(pos.y < size.y)
+	assert(is_in_bound(pos))
 	return Vector3(cell_size * (pos.x + 1 / 2.0) , 0, cell_size * (pos.y + 1 / 2.0)) + position
 
 
@@ -111,7 +171,7 @@ func draw_debug_lines(y_offset: float = 0.02) -> void:
 
 
 func _vector_to_id(vector: Vector2i) -> int:
-	if vector.x < 0 || vector.y < 0 || vector.x >= size.x || vector.y >= size.y:
+	if !is_in_bound(vector):
 		return -1
 	return vector.y * size.x + vector.x
 
